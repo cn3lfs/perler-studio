@@ -1,0 +1,10 @@
+Color data: craft-color-codes by MakeBead (https://makebead.com)
+Source: https://github.com/makebead/craft-color-codes/blob/main/data/json/mard-221.json
+Data license: Creative Commons Attribution 4.0 International (CC BY 4.0)
+License: https://creativecommons.org/licenses/by/4.0/
+Data status: community (not manufacturer-calibrated RGB).
+Changes: retained code/hex fields; normalized codes without zero-padding; users can calibrate HEX values locally.
+
+The built-in example is the 50x50 adapted bead pattern prepared in this project. Its preview is generated from the exact matrix, not sampled from an image with incorrect gridlines.
+The original large reference screenshot is not bundled in this source distribution. Import local PNG/JPEG/WebP references through the editor.
+Application code was written for this task. No third-party JavaScript runtime or font files are bundled. No repository-wide open-source license is implied by the separate color-data license.
