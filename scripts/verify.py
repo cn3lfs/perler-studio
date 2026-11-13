@@ -41,7 +41,12 @@ assert 'ref:false,mark:false,legend:true' in app
 assert 'BOARDS = {52:{mm:2.6},29:{mm:5}}' in app
 assert 'MIN_SIDE = 5, MAX_SIDE = 156' in app
 assert 'BeadQuantize.quantize(' in app
-for file in ['index.html','source/app.js','source/data.js','source/quantize.js','source/example-loader.js']:
+# The AI adviser is opt-in: its checkbox must ship unchecked and no key may be bundled.
+html = (ROOT / 'index.html').read_text(encoding='utf-8')
+assert '<input id="aiEnabled" type="checkbox">' in html
+for source in ['index.html','source/app.js','source/ai.js','source/quantize.js','source/data.js']:
+    assert not re.search(r'sk-[A-Za-z0-9]{16,}', (ROOT / source).read_text(encoding='utf-8')), source
+for file in ['index.html','source/app.js','source/data.js','source/quantize.js','source/ai.js','source/example-loader.js']:
     assert (ROOT/file).is_file(), file
 print(json.dumps({'status':'PASS','rows':50,'cols':50,'beads':len(cells),'colors':len(set(cells)),
                   'palette_colors':len(palette),'components':1,'blue_interval':5,

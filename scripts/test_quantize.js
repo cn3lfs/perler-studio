@@ -3,7 +3,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { rgbToLab, deltaE00, quantize } = require('../source/quantize.js');
+const { rgbToLab, deltaE00, quantize, backgroundMask, sharpenEdges, nearestCode } = require('../source/quantize.js');
 
 // Reference pairs from Sharma, Wu & Dalal, "The CIEDE2000 Color-Difference Formula" (2005), table 1.
 for (const [a, b, expected] of [
@@ -53,5 +53,44 @@ const dithered = quantize(Array(400).fill(mid), 20, 20, twoTone, { dither: true 
 const dark = dithered.filter(c => c === 'H7').length;
 assert(dark > 80 && dark < 320, 'dither should mix both beads, got ' + dark);
 assert.strictEqual(new Set(quantize(Array(400).fill(mid), 20, 20, twoTone)).size, 1, 'without dither a flat field is one colour');
+
+// Strong cleanup removes an isolated high-contrast bead that light cleanup keeps; a 2x2 block always survives.
+assert.strictEqual(quantize(field('H2', 'H7'), 5, 5, palette, { cleanup: 'strong' })[12], 'H7', 'strong cleanup removes a lone bead');
+const block = Array.from({ length: 36 }, (_, i) => [14, 15, 20, 21].includes(i) ? rgb('H2') : rgb('H7'));
+assert.strictEqual(quantize(block, 6, 6, palette, { cleanup: 'strong' }).filter(c => c === 'H2').length, 4, 'strong cleanup keeps a 2x2 block');
+assert.strictEqual(quantize(field('H2', 'H7'), 5, 5, palette, { cleanup: 'none' })[12], 'H2');
+
+// Edge blur: a 50% mix between two contrasting neighbours snaps to one of them; a genuine third colour stays.
+const ink = rgb('H7'), paper = rgb('H2'), mix = ink.map((v, i) => Math.round((v + paper[i]) / 2));
+const row = sharpenEdges([ink, ink, mix, paper, paper], 5, 1);
+assert(row[2].join() === ink.join() || row[2].join() === paper.join(), 'blend must snap to a neighbour');
+assert.strictEqual(sharpenEdges([ink, ink, rgb('F5'), paper, paper], 5, 1)[2].join(), rgb('F5').join(), 'a real third colour must stay');
+assert.strictEqual(sharpenEdges([ink, mix, null], 3, 1)[1].join(), mix.join(), 'no opposite neighbour, no change');
+
+// Background: a cream frame around a framed subject is found from the edges and stops at the outline.
+const W = 9, cream = [246, 240, 225], scene = Array.from({ length: W * W }, (_, i) => {
+ const x = i % W, y = (i - x) / W, ring = Math.max(Math.abs(x - 4), Math.abs(y - 4));
+ return ring === 4 || ring === 3 ? cream.map(v => v - (i % 3)) : ring === 2 ? ink : ring === 1 ? paper : cream;
+});
+const bg = backgroundMask(scene, W, W, 12);
+assert.strictEqual(bg.mask.reduce((a, b) => a + b, 0), W * W - 25, 'mask covers the two outer rings only');
+assert(Math.abs(bg.rgb[0] - cream[0]) <= 2, 'backdrop colour is the frame colour');
+assert.strictEqual(backgroundMask([null, null, null, null], 2, 2, 12).rgb, null);
+// Specks in the backdrop that are a bit too grey for the flood are absorbed; a contrasting dot is not.
+const speckled = scene.slice(); speckled[10] = [214, 210, 200]; speckled[16] = [20, 20, 20];
+const bg2 = backgroundMask(speckled, W, W, 12);
+assert(bg2.mask[10] === 1 && bg2.mask[16] === 0, 'grey speck joins the background, black dot stays');
+assert.strictEqual(bg2.mask.reduce((a, b) => a + b, 0), W * W - 26);
+const beads = ['H7', 'H2', 'H13'].map(c => palette.find(p => p.code === c));
+assert.strictEqual(nearestCode(bg.rgb, beads), 'H13');
+// unify: every background cell gets the chosen bead; the enclosed cream centre keeps its own match ...
+const unified = quantize(scene, W, W, beads, { mask: bg.mask, maskCode: 'H13', cleanup: 'none' });
+assert(unified.every((c, i) => !bg.mask[i] || c === 'H13') && unified[40] === 'H13' && unified[0] === 'H13');
+// ... unless the background bead is reserved, in which case the centre takes the next best bead.
+const reserved = quantize(scene, W, W, beads, { mask: bg.mask, maskCode: 'H13', maskExclusive: true, cleanup: 'none' });
+assert(reserved[40] === 'H2' && reserved[0] === 'H13' && reserved.filter(c => c === 'H13').length === W * W - 25);
+// empty: background cells stay without beads.
+assert.strictEqual(quantize(scene, W, W, beads, { mask: bg.mask, cleanup: 'none' }).filter(c => c === null).length, W * W - 25);
+assert.throws(() => quantize(scene, W, W, beads, { mask: bg.mask, maskCode: 'A1' }), /Background bead/);
 
 console.log('quantize: all checks passed');

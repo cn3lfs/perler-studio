@@ -29,7 +29,6 @@
  function hexRgb(hex){return [1,3,5].map(i=>parseInt(hex.slice(i,i+2),16));}
  function contrast(hex){const [r,g,b]=hexRgb(hex);return (.2126*r+.7152*g+.0722*b)>148?'#17232A':'#FFFFFF';}
  function rgbToLab(rgb){let [r,g,b]=rgb.map(v=>{v/=255;return v>.04045?((v+.055)/1.055)**2.4:v/12.92;});let a=[(r*.4124564+g*.3575761+b*.1804375)/.95047,(r*.2126729+g*.7151522+b*.072175),(r*.0193339+g*.119192+b*.9503041)/1.08883].map(v=>v>.008856?Math.cbrt(v):7.787*v+16/116);return [116*a[1]-16,500*(a[0]-a[1]),200*(a[1]-a[2])];}
- const distance=(a,b)=>(a[0]-b[0])**2+(a[1]-b[1])**2+(a[2]-b[2])**2;
  function neighbors(i,cols=state.cols,rows=state.rows){const out=[],x=i%cols,y=Math.floor(i/cols);if(x>0)out.push(i-1);if(x+1<cols)out.push(i+1);if(y>0)out.push(i-cols);if(y+1<rows)out.push(i+cols);return out;}
  function components(cells=state.cells,cols=state.cols,rows=state.rows){const seen=new Uint8Array(cells.length),groups=[];for(let i=0;i<cells.length;i++){if(!cells[i]||seen[i])continue;const q=[i];seen[i]=1;for(let k=0;k<q.length;k++)for(const j of neighbors(q[k],cols,rows))if(cells[j]&&!seen[j]){seen[j]=1;q.push(j);}groups.push(q);}groups.sort((a,b)=>b.length-a.length);return groups;}
  function currentComponents(){if(!componentsCache)componentsCache=components();return componentsCache;}
@@ -187,10 +186,44 @@
   for(let r=0;r<state.rows;r++)for(let c=0;c<state.cols;c++){const channels=[[],[],[]];for(let dy=from;dy<to;dy++)for(let dx=from;dx<to;dx++){const i=((r*ss+dy)*can.width+c*ss+dx)*4;if(pixels[i+3]<128)continue;for(let k=0;k<3;k++)channels[k].push(pixels[i+k]);}if(channels[0].length<needed){samples.push(null);continue;}samples.push(channels.map(a=>{if(average)return Math.round(a.reduce((x,y)=>x+y,0)/a.length);a.sort((x,y)=>x-y);return a[Math.floor(a.length/2)];}));}
   return samples;
  }
- async function convertReference(){if(!reference.img)throw Error('请先载入参考图。');if(state.cells.some(Boolean)&&!confirm('用参考图重新生成图纸？当前格子会被替换，可撤销。'))return;$('convertBtn').disabled=true;$('convertBtn').textContent='正在取色与匹配…';await new Promise(r=>setTimeout(r,25));try{const samples=sampleReference($('sampleMode').value),sampleLabs=samples.map(rgb=>rgb?rgbToLab(rgb):null);const remove=$('removeBg').checked,mask=new Uint8Array(samples.length);if(remove){const edges=[];for(let i=0;i<samples.length;i++){const x=i%state.cols,y=Math.floor(i/state.cols);if(samples[i]&&(x===0||y===0||x===state.cols-1||y===state.rows-1))edges.push(i);}let background=null;if(edges.length){const histogram=new Map();for(const i of edges){const key=samples[i].map(v=>Math.round(v/16)).join(',');const entry=histogram.get(key)||[];entry.push(i);histogram.set(key,entry);}const dominant=[...histogram.values()].sort((a,b)=>b.length-a.length)[0];background=sampleLabs[dominant[Math.floor(dominant.length/2)]];}if(background){const tol=Number($('bgTolerance').value)**2,q=[];for(let i=0;i<samples.length;i++){const x=i%state.cols,y=Math.floor(i/state.cols);if(x===0||y===0||x===state.cols-1||y===state.rows-1){if(!sampleLabs[i]||distance(sampleLabs[i],background)<=tol){mask[i]=1;q.push(i);}}}for(let k=0;k<q.length;k++)for(const j of neighbors(q[k]))if(!mask[j]&&(!sampleLabs[j]||distance(sampleLabs[j],background)<=tol)){mask[j]=1;q.push(j);}}}
-   // H1 is the transparent bead in MARD 221; it stays available by hand but is never auto-matched.
-   const dither=$('dither').checked,mapped=BeadQuantize.quantize(samples,state.cols,state.rows,palette.filter(c=>c.code!=='H1'),{limit:Number($('colorLimit').value),dither,despeckle:$('despeckle').checked&&!dither,mask});
-   pushUndo();state.cells=mapped;modelChanged();$('showReference').checked=false;highlight=false;renderAll();renderPalette();const a=audit();toast(`图纸已生成：${a.usedBeads} 颗 / ${a.colorCount} 色，${a.connectedComponents} 个连通区域。请检查细节后导出。`);
+ /** Codes typed into 「限定色号」; null when the field is empty (= choose automatically). */
+ function fixedCodes(){const raw=$('fixedCodes').value.trim();if(!raw)return null;const codes=[...new Set(raw.split(/[\s,，、;；]+/).filter(Boolean).map(canonical))];if(codes.length<2)throw Error('限定色号至少需要 2 个。');return codes;}
+ /** The local conversion: samples in, one bead code (or null) per cell out. Reads every option from the panel. */
+ function localConvert(samples){
+  const flat=$('sampleMode').value==='dominant',fixed=fixedCodes(),bgMode=$('bgMode').value,dither=$('dither').checked;
+  if($('sharpen').checked&&flat)samples=BeadQuantize.sharpenEdges(samples,state.cols,state.rows);
+  // H1 is the transparent bead in MARD 221; it stays available by hand but is never auto-matched.
+  let beads=fixed?fixed.map(c=>paletteMap.get(c)):palette.filter(c=>c.code!=='H1'),mask=null,maskCode=null;
+  if(bgMode!=='keep'){const b=BeadQuantize.backgroundMask(samples,state.cols,state.rows,Number($('bgTolerance').value));mask=b.mask;
+   if(bgMode==='unify'&&b.rgb){const wanted=$('bgCode').value.trim();maskCode=wanted?canonical(wanted):BeadQuantize.nearestCode(b.rgb,beads);if(!beads.some(c=>c.code===maskCode))beads=[...beads,paletteMap.get(maskCode)];}}
+  return BeadQuantize.quantize(samples,state.cols,state.rows,beads,{limit:fixed?0:Number($('colorLimit').value),dither,cleanup:dither?'none':$('cleanupLevel').value,mask,maskCode,maskExclusive:$('bgReserve').checked});
+ }
+ // Optional AI adviser. It receives a small thumbnail and the first-pass colour list, and only fills in the
+ // options above; the conversion itself stays local. Nothing is sent unless the box is ticked.
+ const aiStorageKey='bead-grid-studio-ai';
+ function aiConfig(){return {apiKey:$('aiKey').value.trim(),baseUrl:$('aiBase').value.trim()||BeadAI.DEFAULTS.baseUrl,model:$('aiModel').value.trim()||BeadAI.DEFAULTS.model,effort:$('aiEffort').value};}
+ function syncAI(){const on=$('aiEnabled').checked;$('aiFields').hidden=!on;$('privacyText').textContent=on?'AI 已开启 · 生成时上传缩略图':'离线运行 · 图片不上传';}
+ function saveAI(){try{if($('aiRemember').checked)localStorage.setItem(aiStorageKey,JSON.stringify({...aiConfig(),enabled:$('aiEnabled').checked}));else localStorage.removeItem(aiStorageKey);}catch{/* storage unavailable: settings last for this page only */}syncAI();}
+ for(const id of ['aiEnabled','aiKey','aiBase','aiModel','aiEffort','aiRemember'])$(id).onchange=saveAI;
+ $('aiForgetBtn').onclick=()=>{$('aiKey').value='';try{localStorage.removeItem(aiStorageKey);}catch{}saveAI();toast('已清除本浏览器保存的 API Key。');};
+ function referenceThumb(max=512){const c=reference.crop,k=Math.min(1,max/Math.max(c.w,c.h)),can=document.createElement('canvas');can.width=Math.max(1,Math.round(c.w*k));can.height=Math.max(1,Math.round(c.h*k));const ctx=can.getContext('2d');ctx.fillStyle='#FFFFFF';ctx.fillRect(0,0,can.width,can.height);ctx.drawImage(reference.img,c.x,c.y,c.w,c.h,0,0,can.width,can.height);return can.toDataURL('image/jpeg',.85);}
+ async function askAI(samples){
+  if($('sharpen').checked)samples=BeadQuantize.sharpenEdges(samples,state.cols,state.rows);
+  const first=BeadQuantize.quantize(samples,state.cols,state.rows,palette.filter(c=>c.code!=='H1'),{cleanup:'none'}),count=new Map();
+  for(const code of first)if(code)count.set(code,(count.get(code)||0)+1);
+  const candidates=[...count].sort((a,b)=>b[1]-a[1]).map(([code,cells])=>({code,hex:paletteMap.get(code).hex,cells})),lab=code=>rgbToLab(hexRgb(paletteMap.get(code).hex));
+  return BeadAI.advise(aiConfig(),{imageDataUrl:referenceThumb(),candidates,maxColors:Number($('colorLimit').value),cols:state.cols,rows:state.rows,distance:(a,b)=>BeadQuantize.deltaE00(lab(a),lab(b))});
+ }
+ function applyAdvice(a){$('sampleMode').value=a.sampling;$('bgMode').value=a.background;$('bgCode').value=a.backgroundCode||'';$('bgReserve').checked=a.reserveBackground;$('cleanupLevel').value=a.cleanup;$('fixedCodes').value=a.palette.join(', ');$('aiNote').textContent=[`AI 判断：${a.subject||'（未描述）'}。选定 ${a.palette.length} 个色号，已填入上方选项，可手动修改后重新生成。`,...a.warnings.map(w=>'· '+w)].join('\n');}
+ async function convertReference(){if(!reference.img)throw Error('请先载入参考图。');fixedCodes();if($('aiEnabled').checked&&!$('aiKey').value.trim())throw Error('已勾选 AI 辅助，请先填写 API Key，或取消勾选。');if(state.cells.some(Boolean)&&!confirm('用参考图重新生成图纸？当前格子会被替换，可撤销。'))return;$('convertBtn').disabled=true;$('convertBtn').textContent='正在取色与匹配…';await new Promise(r=>setTimeout(r,25));
+  try{let samples=sampleReference($('sampleMode').value),aiError='';
+   if($('aiEnabled').checked){$('convertBtn').textContent=$('aiEffort').value==='fast'?'AI 正在分析…':'AI 正在仔细分析（约半分钟）…';
+    try{const advice=await askAI(samples),resample=advice.sampling!==$('sampleMode').value;applyAdvice(advice);if(resample)samples=sampleReference(advice.sampling);}
+    catch(e){console.error(e);aiError=e.message||String(e);$('aiNote').textContent='AI 未生效：'+aiError;}
+    $('convertBtn').textContent='正在取色与匹配…';await new Promise(r=>setTimeout(r,25));}
+   const mapped=localConvert(samples);
+   pushUndo();state.cells=mapped;modelChanged();$('showReference').checked=false;highlight=false;renderAll();renderPalette();const a=audit(),summary=`${a.usedBeads} 颗 / ${a.colorCount} 色，${a.connectedComponents} 个连通区域`;
+   if(aiError)toast(`AI 未生效（${aiError}）已按当前本地选项生成：${summary}。`,true);else toast(`图纸已生成：${summary}。请检查细节后导出。`);
   }finally{$('convertBtn').disabled=false;$('convertBtn').textContent='生成拼豆图纸';}
  }
  $('convertBtn').onclick=guard(convertReference);
@@ -228,12 +261,14 @@
  $('validateBtn').onclick=showReport;$('downloadReportBtn').onclick=()=>jsonDownload(audit(),'bead-validation.json');$('reportCloseBtn').onclick=()=>$('reportDialog').close();$('helpBtn').onclick=()=>$('helpDialog').showModal();$('helpCloseBtn').onclick=()=>$('helpDialog').close();
  document.addEventListener('keydown',e=>{if(['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)||document.querySelector('dialog[open]'))return;if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo();}else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='y'){e.preventDefault();redo();}else{const tools={b:'draw',e:'erase',f:'fill',i:'pick',v:'pan'};if(tools[e.key.toLowerCase()]){e.preventDefault();setTool(tools[e.key.toLowerCase()]);}}});
  // Public read-only snapshots and explicitly mutating hooks for tests / further integration.
- window.BeadStudio={audit,geometry,boards,boardViews,gridSVG,sampleReference,exportBoards,components:(cells,cols,rows)=>components(cells,cols,rows),getState:()=>clone(state),getPalette:()=>clone(palette),exportedSVG,matrixCSV,usageCSV,projectData,convertReference,renderAll,undo,redo,validateState,validatePalette,normalize,
+ window.BeadStudio={localConvert,aiConfig,audit,geometry,boards,boardViews,gridSVG,sampleReference,exportBoards,components:(cells,cols,rows)=>components(cells,cols,rows),getState:()=>clone(state),getPalette:()=>clone(palette),exportedSVG,matrixCSV,usageCSV,projectData,convertReference,renderAll,undo,redo,validateState,validatePalette,normalize,
   setCells(cells){if(cells.length!==state.cols*state.rows)throw Error('Incorrect cell count');const next=cells.map(c=>c===null?null:canonical(c));pushUndo();state.cells=next;modelChanged();renderAll();},
   connect(width=2){pushUndo();const count=autoConnect(width);modelChanged();renderAll();return count;},
   setSelected:selectColor,ready:false};
  setPalette(BASE_PALETTE);
  try{const cached=JSON.parse(localStorage.getItem(storageKey)||'null');if(cached){const s=validateState(cached.state),p=validatePalette(cached.palette);state=s;setPalette(p);$('saveStatus').textContent='已恢复本地格子 · 参考图为校验示例';}}catch{/* Keep a clean state when storage is unavailable or corrupt. */}
+ try{const saved=JSON.parse(localStorage.getItem(aiStorageKey)||'null');if(saved&&typeof saved==='object'){$('aiKey').value=String(saved.apiKey||'');$('aiBase').value=String(saved.baseUrl||'');$('aiModel').value=String(saved.model||'');if(saved.effort==='fast')$('aiEffort').value='fast';$('aiEnabled').checked=saved.enabled===true;}}catch{/* ignore unreadable settings */}
+ if(!$('aiBase').value)$('aiBase').value=BeadAI.DEFAULTS.baseUrl;if(!$('aiModel').value)$('aiModel').value=BeadAI.DEFAULTS.model;syncAI();
  syncSettings();renderPalette();renderAll();
  loadReference(BUILTIN_REFERENCE,'内置示例 · 爱拼才会赢 50×50',BUILTIN_CROP).then(()=>{window.BeadStudio.ready=true;fitView();}).catch(e=>{toast(e.message,true);window.BeadStudio.ready=true;fitView();});
  let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(!drawing)fitView();},180);});
