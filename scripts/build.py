@@ -26,7 +26,7 @@ project = {
     'reference':None
 }
 html = (ROOT / 'index.html').read_text(encoding='utf-8')
-for name in ['data.js', 'app.js', 'example-loader.js']:
+for name in ['data.js', 'quantize.js', 'app.js', 'example-loader.js']:
     marker = '<script src="source/' + name + '"></script>'
     assert html.count(marker) == 1, marker
     code = (ROOT / 'source' / name).read_text(encoding='utf-8')

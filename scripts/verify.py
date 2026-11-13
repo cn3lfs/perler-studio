@@ -37,10 +37,14 @@ majors = edges[::5]
 assert len(edges) == 51 and len(majors) == 11
 assert all((b-a)/32 == 5 for a,b in zip(majors,majors[1:]))
 assert 'ref:false,mark:false,legend:true' in app
-for file in ['index.html','source/app.js','source/data.js','source/example-loader.js']:
+# Peg boards sold for the two common bead sizes, and the free grid range.
+assert 'BOARDS = {52:{mm:2.6},29:{mm:5}}' in app
+assert 'MIN_SIDE = 5, MAX_SIDE = 156' in app
+assert 'BeadQuantize.quantize(' in app
+for file in ['index.html','source/app.js','source/data.js','source/quantize.js','source/example-loader.js']:
     assert (ROOT/file).is_file(), file
 print(json.dumps({'status':'PASS','rows':50,'cols':50,'beads':len(cells),'colors':len(set(cells)),
                   'palette_colors':len(palette),'components':1,'blue_interval':5,
                   'cell_data_sha256':hashlib.sha256(json.dumps(cells,separators=(',',':')).encode()).hexdigest(),
                   'usage':dict(Counter(cells))}, ensure_ascii=False, indent=2))
-print('Static/data checks only. Browser rendering and exports require separate browser tests.')
+print('Static/data checks only. Run `node scripts/test_quantize.js` for colour matching; browser rendering and exports require separate browser tests.')
